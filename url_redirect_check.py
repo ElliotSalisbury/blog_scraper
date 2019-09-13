@@ -2,8 +2,10 @@ import collections
 import csv
 import os
 from urllib.parse import urlparse
+from requests_futures.sessions import FuturesSession
 
 import requests
+from url_normalize import url_normalize
 
 IN_FILE = "UK Accounts & Websites.csv"
 OUT_FILE = "urls.csv"
@@ -12,6 +14,7 @@ headers = {
     "Upgrade-Insecure-Requests": "1", "DNT": "1",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5", "Accept-Encoding": "gzip, deflate"}
+OUT_EVERY = 50
 
 # read the output file to know what we've attempted so far
 done = set()
@@ -23,6 +26,8 @@ if os.path.exists(OUT_FILE):
             done.add(row[0])
             out.append(row)
 
+# read the input file to know what we need to scrape next
+todo = {}
 # load in the nput file and begin requesting the companies url
 with open(IN_FILE, "r") as f:
     reader = csv.reader(f)
@@ -30,42 +35,68 @@ with open(IN_FILE, "r") as f:
         if i == 0 or row[0] in done:
             continue
         else:
-            sfid = row[0]
-            name = row[1]
-            url = row[2]
+            todo[row[0]] = row
 
-            if url:
-                try:
-                    if not url.startswith("http://"):
-                        url = "http://" + url
+curr_out_size = len(out)
 
-                    print(f"{i}: {url}")
+session = FuturesSession()
 
-                    response = requests.get(url, timeout=10, headers=headers)
+futures = {}
+for k, row in todo.items():
+    sfid = row[0]
+    name = row[1]
+    url = row[2]
 
-                    redirected = False
-                    if response.history:
-                        redirected = True
-                        for resp in response.history:
-                            print(f"\t{resp.status_code} - {resp.url}")
-                        print(f"\t{response.status_code} - {response.url}")
+    if url:
+        url_normed = url_normalize(url)
+        url_hostname = urlparse(url_normed).hostname.replace("www.", "")
+        if not url.startswith("http://"):
+            url = "http://" + url
 
-                    same_host = True
-                    if redirected:
-                        orig = urlparse(url).hostname.replace("www.", "")
-                        new = urlparse(response.url).hostname.replace("www.", "")
-                        if orig != new:
-                            same_host = False
+        future = session.get(url, timeout=10, headers=headers)
+        futures[sfid] = future
 
-                        print(f"\tSame Hostname: {same_host}")
+finished = False
+while not finished:
+    completed = {k:f for k, f in futures.items() if f.done()}
+    [futures.pop(k) for k in completed]
 
-                    row = row + [redirected, same_host, response.url]
-                except (requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout, requests.exceptions.TooManyRedirects, requests.exceptions.InvalidURL):
-                    print("\tfailed")
-                    row = row + [False,]
+    for sfid, future in completed.items():
+        row = todo[sfid]
+        try:
+            print(f"({len(futures)}) {row[2]}")
+            response = future.result()
 
-            out.append(row)
+            redirected = False
+            if response.history:
+                redirected = True
+                for resp in response.history:
+                    print(f"\t{resp.status_code} - {resp.url}")
+                print(f"\t{response.status_code} - {response.url}")
 
+            same_host = True
+            if redirected:
+                orig_url_normed = url_normalize(row[2])
+                orig_url_hostname = urlparse(orig_url_normed).hostname.replace("www.", "")
+                new_url_normed = url_normalize(response.url)
+                new_url_hostname = urlparse(new_url_normed).hostname.replace("www.", "")
+
+                if orig_url_hostname != new_url_hostname:
+                    same_host = False
+
+                print(f"\tSame Hostname: {same_host}")
+
+            row = row + [redirected, same_host, response.url]
+        except (requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout, requests.exceptions.TooManyRedirects, requests.exceptions.InvalidURL):
+            print("\tfailed")
+            row = row + [False,]
+        out.append(row)
+
+    if len(out) > curr_out_size + OUT_EVERY or len(futures) == 0:
         with open(OUT_FILE, "w", newline='') as f:
             writer = csv.writer(f)
             writer.writerows(out)
+        curr_out_size = len(out)
+
+    if len(futures) == 0:
+        finished = True
