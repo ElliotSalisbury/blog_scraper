@@ -48,13 +48,18 @@ for k, row in todo.items():
     url = row[2]
 
     if url:
-        url_normed = url_normalize(url)
-        url_hostname = urlparse(url_normed).hostname.replace("www.", "")
-        if not url.startswith("http://"):
-            url = "http://" + url
+        url_normed = url
+        try:
+            url_normed = url_normalize(url)
+            url_hostname = urlparse(url_normed).hostname.replace("www.", "")
+            row[2] = url_hostname
 
-        future = session.get(url, timeout=10, headers=headers)
-        futures[sfid] = future
+            if not url_hostname.startswith("http://"):
+                url_hostname = "http://" + url_hostname
+            future = session.get(url_hostname, timeout=10, headers=headers)
+            futures[sfid] = future
+        except:
+            pass
 
 finished = False
 while not finished:
@@ -76,8 +81,7 @@ while not finished:
 
             same_host = True
             if redirected:
-                orig_url_normed = url_normalize(row[2])
-                orig_url_hostname = urlparse(orig_url_normed).hostname.replace("www.", "")
+                orig_url_hostname = row[2]
                 new_url_normed = url_normalize(response.url)
                 new_url_hostname = urlparse(new_url_normed).hostname.replace("www.", "")
 
